@@ -4,29 +4,29 @@ use crate::common::TagClass;
 use crate::common::TagStructure;
 use crate::structure::{PL, StructureTag};
 
-use nom;
-use nom::bits::streaming as bits;
+use nom::Needed;
+use nom::bits::{bits, streaming as bit_streaming};
 use nom::bytes::streaming::take;
 use nom::combinator::map_opt;
-use nom::error::{Error, ErrorKind, ParseError};
+use nom::error::ParseError;
+use nom::error::{Error, ErrorKind};
 use nom::number::streaming as number;
-use nom::sequence::tuple;
-use nom::{IResult, InputLength, Needed};
+use nom::{IResult, Parser as NomParser};
 
 fn class_bits(i: (&[u8], usize)) -> nom::IResult<(&[u8], usize), TagClass> {
-    map_opt(bits::take(2usize), TagClass::from_u8)(i)
+    map_opt(bit_streaming::take(2usize), TagClass::from_u8).parse(i)
 }
 
 fn pc_bit(i: (&[u8], usize)) -> nom::IResult<(&[u8], usize), TagStructure> {
-    map_opt(bits::take(1usize), TagStructure::from_u8)(i)
+    map_opt(bit_streaming::take(1usize), TagStructure::from_u8).parse(i)
 }
 
 fn tagnr_bits(i: (&[u8], usize)) -> nom::IResult<(&[u8], usize), u64> {
-    bits::take(5usize)(i)
+    bit_streaming::take(5usize).parse(i)
 }
 
 fn parse_type_header(i: &[u8]) -> nom::IResult<&[u8], (TagClass, TagStructure, u64)> {
-    nom::bits(tuple((class_bits, pc_bit, tagnr_bits)))(i)
+    bits((class_bits, pc_bit, tagnr_bits))(i)
 }
 
 fn parse_length(i: &[u8]) -> nom::IResult<&[u8], usize> {
@@ -52,7 +52,7 @@ pub fn parse_uint(i: &[u8]) -> nom::IResult<&[u8], u64> {
 
 /// Parse raw BER data into a serializable structure.
 pub fn parse_tag(i: &[u8]) -> nom::IResult<&[u8], StructureTag> {
-    let (mut i, ((class, structure, id), len)) = tuple((parse_type_header, parse_length))(i)?;
+    let (mut i, ((class, structure, id), len)) = (parse_type_header, parse_length).parse(i)?;
 
     let pl: PL = match structure {
         TagStructure::Primitive => {
@@ -66,7 +66,7 @@ pub fn parse_tag(i: &[u8]) -> nom::IResult<&[u8], StructureTag> {
             i = j;
 
             let mut tv: Vec<StructureTag> = Vec::new();
-            while content.input_len() > 0 {
+            while !content.is_empty() {
                 let (j, sub) = parse_tag(content)?;
                 content = j;
                 tv.push(sub);

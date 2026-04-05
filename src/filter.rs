@@ -4,15 +4,14 @@
 use lber::common::TagClass;
 use lber::structures::{Boolean, ExplicitTag, OctetString, Sequence, Tag};
 
-use nom::IResult;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_while, take_while1};
 use nom::character::complete::digit1;
-use nom::character::{is_alphabetic, is_alphanumeric, is_hex_digit};
 use nom::combinator::{map, map_res, opt, recognize, verify};
 use nom::multi::{fold_many0, many0, many1};
 use nom::number::complete::be_u8;
 use nom::sequence::{delimited, preceded};
+use nom::{AsChar, IResult, Parser};
 
 #[doc(hidden)]
 pub fn parse(input: impl AsRef<[u8]>) -> Result<Tag, ()> {
@@ -58,27 +57,29 @@ const SUB_ANY: u64 = 1;
 const SUB_FINAL: u64 = 2;
 
 fn filtexpr(i: &[u8]) -> IResult<&[u8], Tag> {
-    alt((filter, item))(i)
+    alt((filter, item)).parse(i)
 }
 
+// TODO right now: fix //the trait bound &[u8; 1]: Input is not satisfied
+// the trait Input is not implemented for &[u8; 1] (rustc E0277)
 fn filter(i: &[u8]) -> IResult<&[u8], Tag> {
-    delimited(tag(b"("), filtercomp, tag(b")"))(i)
+    delimited(tag(b"(" as &[u8]), filtercomp, tag(b")" as &[u8])).parse(i)
 }
 
 fn filtercomp(i: &[u8]) -> IResult<&[u8], Tag> {
-    alt((and, or, not, item))(i)
+    alt((and, or, not, item)).parse(i)
 }
 
 fn filterlist(i: &[u8]) -> IResult<&[u8], Vec<Tag>> {
-    many0(filter)(i)
+    many0(filter).parse(i)
 }
 
 fn mv_filtexpr(i: &[u8]) -> IResult<&[u8], Tag> {
-    delimited(tag(b"("), mv_filterlist, tag(b")"))(i)
+    delimited(tag(b"(" as &[u8]), mv_filterlist, tag(b")" as &[u8])).parse(i)
 }
 
 fn mv_filteritems(i: &[u8]) -> IResult<&[u8], Vec<Tag>> {
-    many1(delimited(tag(b"("), item, tag(b")")))(i)
+    many1(delimited(tag(b"(" as &[u8]), item, tag(b")" as &[u8]))).parse(i)
 }
 
 fn mv_filterlist(i: &[u8]) -> IResult<&[u8], Tag> {
@@ -87,41 +88,51 @@ fn mv_filterlist(i: &[u8]) -> IResult<&[u8], Tag> {
             inner: tagv,
             ..Default::default()
         })
-    })(i)
+    })
+    .parse(i)
 }
 
 fn and(i: &[u8]) -> IResult<&[u8], Tag> {
-    map(preceded(tag(b"&"), filterlist), |tagv: Vec<Tag>| -> Tag {
-        Tag::Sequence(Sequence {
-            class: TagClass::Context,
-            id: AND_FILT,
-            inner: tagv,
-        })
-    })(i)
+    map(
+        preceded(tag(b"&" as &[u8]), filterlist),
+        |tagv: Vec<Tag>| -> Tag {
+            Tag::Sequence(Sequence {
+                class: TagClass::Context,
+                id: AND_FILT,
+                inner: tagv,
+            })
+        },
+    )
+    .parse(i)
 }
 
 fn or(i: &[u8]) -> IResult<&[u8], Tag> {
-    map(preceded(tag(b"|"), filterlist), |tagv: Vec<Tag>| -> Tag {
-        Tag::Sequence(Sequence {
-            class: TagClass::Context,
-            id: OR_FILT,
-            inner: tagv,
-        })
-    })(i)
+    map(
+        preceded(tag(b"|" as &[u8]), filterlist),
+        |tagv: Vec<Tag>| -> Tag {
+            Tag::Sequence(Sequence {
+                class: TagClass::Context,
+                id: OR_FILT,
+                inner: tagv,
+            })
+        },
+    )
+    .parse(i)
 }
 
 fn not(i: &[u8]) -> IResult<&[u8], Tag> {
-    map(preceded(tag(b"!"), filter), |tag: Tag| -> Tag {
+    map(preceded(tag(b"!" as &[u8]), filter), |tag: Tag| -> Tag {
         Tag::ExplicitTag(ExplicitTag {
             class: TagClass::Context,
             id: NOT_FILT,
             inner: Box::new(tag),
         })
-    })(i)
+    })
+    .parse(i)
 }
 
 fn item(i: &[u8]) -> IResult<&[u8], Tag> {
-    alt((eq, non_eq, extensible))(i)
+    alt((eq, non_eq, extensible)).parse(i)
 }
 
 pub(crate) enum Unescaper {
@@ -136,7 +147,7 @@ impl Unescaper {
         match *self {
             Unescaper::Error => Unescaper::Error,
             Unescaper::WantFirst => {
-                if is_hex_digit(c) {
+                if c.is_hex_digit() {
                     Unescaper::WantSecond(
                         c - if c <= b'9' {
                             b'0'
@@ -149,7 +160,7 @@ impl Unescaper {
                 }
             }
             Unescaper::WantSecond(partial) => {
-                if is_hex_digit(c) {
+                if c.is_hex_digit() {
                     Unescaper::Value(
                         (partial << 4)
                             + (c - if c <= b'9' {
@@ -196,7 +207,8 @@ fn unescaped(i: &[u8]) -> IResult<&[u8], Vec<u8>> {
                 Err(())
             }
         },
-    )(i)
+    )
+    .parse(i)
 }
 
 fn is_value_char(&c: &u8) -> bool {
@@ -205,7 +217,12 @@ fn is_value_char(&c: &u8) -> bool {
 
 fn non_eq(i: &[u8]) -> IResult<&[u8], Tag> {
     let (i, attr) = attributedescription(i)?;
-    let (i, filterop) = alt((tag(b">="), tag(b"<="), tag("~=")))(i)?;
+    let (i, filterop) = alt((
+        tag(b">=" as &[u8]),
+        tag(b"<=" as &[u8]),
+        tag(b"~=" as &[u8]),
+    ))
+    .parse(i)?;
     let (i, value) = unescaped(i)?;
     let tag = Tag::Sequence(Sequence {
         class: TagClass::Context,
@@ -235,10 +252,10 @@ fn filtertag(filterop: &[u8]) -> u64 {
 
 fn eq(i: &[u8]) -> IResult<&[u8], Tag> {
     let (i, attr) = attributedescription(i)?;
-    let (i, _) = tag(b"=")(i)?;
+    let (i, _) = tag(b"=" as &[u8])(i)?;
     let (i, initial) = unescaped(i)?;
     let (i, mid_final) = map_res(
-        many0(preceded(tag(b"*"), unescaped)),
+        many0(preceded(tag(b"*" as &[u8]), unescaped)),
         |v: Vec<Vec<u8>>| -> Result<Vec<Vec<u8>>, ()> {
             if v.iter().enumerate().fold(false, |acc, (n, ve)| {
                 acc || ve.is_empty() && n + 1 != v.len()
@@ -248,7 +265,8 @@ fn eq(i: &[u8]) -> IResult<&[u8], Tag> {
                 Ok(v)
             }
         },
-    )(i)?;
+    )
+    .parse(i)?;
     let tag = if mid_final.is_empty() {
         // simple equality, no asterisks in assertion value
         Tag::Sequence(Sequence {
@@ -312,22 +330,22 @@ fn eq(i: &[u8]) -> IResult<&[u8], Tag> {
 }
 
 fn extensible(i: &[u8]) -> IResult<&[u8], Tag> {
-    alt((attr_dn_mrule, dn_mrule))(i)
+    alt((attr_dn_mrule, dn_mrule)).parse(i)
 }
 
 fn attr_dn_mrule(i: &[u8]) -> IResult<&[u8], Tag> {
     let (i, attr) = attributedescription(i)?;
-    let (i, dn) = opt(tag(b":dn"))(i)?;
-    let (i, mrule) = opt(preceded(tag(b":"), attributetype))(i)?;
-    let (i, _) = tag(b":=")(i)?;
+    let (i, dn) = opt(tag(b":dn" as &[u8])).parse(i)?;
+    let (i, mrule) = opt(preceded(tag(b":" as &[u8]), attributetype)).parse(i)?;
+    let (i, _) = tag(b":=" as &[u8]).parse(i)?;
     let (i, value) = unescaped(i)?;
     Ok((i, extensible_tag(mrule, Some(attr), value, dn.is_some())))
 }
 
 fn dn_mrule(i: &[u8]) -> IResult<&[u8], Tag> {
-    let (i, dn) = opt(tag(b":dn"))(i)?;
-    let (i, mrule) = preceded(tag(b":"), attributetype)(i)?;
-    let (i, _) = tag(b":=")(i)?;
+    let (i, dn) = opt(tag(b":dn" as &[u8])).parse(i)?;
+    let (i, mrule) = preceded(tag(b":" as &[u8]), attributetype).parse(i)?;
+    let (i, _) = tag(b":=" as &[u8]).parse(i)?;
     let (i, value) = unescaped(i)?;
     Ok((i, extensible_tag(Some(mrule), None, value, dn.is_some())))
 }
@@ -369,39 +387,42 @@ fn extensible_tag(mrule: Option<&[u8]>, attr: Option<&[u8]>, value: Vec<u8>, dn:
 
 fn attributedescription(i: &[u8]) -> IResult<&[u8], &[u8]> {
     recognize(|i| -> IResult<&[u8], ()> {
-        let (i, _) = attributetype(i)?;
-        let (i, _) = many0(preceded(tag(b";"), take_while1(is_alnum_hyphen)))(i)?;
+        let (i, _) = attributetype.parse(i)?;
+        let (i, _) = many0(preceded(tag(b";" as &[u8]), take_while1(is_alnum_hyphen))).parse(i)?;
         Ok((i, ()))
-    })(i)
+    })
+    .parse(i)
 }
 
 fn is_alnum_hyphen(c: u8) -> bool {
-    is_alphanumeric(c) || c == b'-'
+    c.is_alphanum() || c == b'-'
 }
 
 fn attributetype(i: &[u8]) -> IResult<&[u8], &[u8]> {
-    alt((numericoid, descr))(i)
+    alt((numericoid, descr)).parse(i)
 }
 
 fn numericoid(i: &[u8]) -> IResult<&[u8], &[u8]> {
     recognize(|i| -> IResult<&[u8], ()> {
-        let (i, _) = number(i)?;
-        let (i, _) = many0(preceded(tag(b"."), number))(i)?;
+        let (i, _) = number.parse(i)?;
+        let (i, _) = many0(preceded(tag(b"." as &[u8]), number)).parse(i)?;
         Ok((i, ()))
-    })(i)
+    })
+    .parse(i)
 }
 
 // A number may be zero, but must not have superfluous leading zeroes
 fn number(i: &[u8]) -> IResult<&[u8], &[u8]> {
-    verify(digit1, |d: &[u8]| d.len() == 1 || d[0] != b'0')(i)
+    verify(digit1, |d: &[u8]| d.len() == 1 || d[0] != b'0').parse(i)
 }
 
 fn descr(i: &[u8]) -> IResult<&[u8], &[u8]> {
     recognize(|i| -> IResult<&[u8], ()> {
-        let (i, _) = verify(be_u8, |c| is_alphabetic(*c))(i)?;
-        let (i, _) = take_while(is_alnum_hyphen)(i)?;
+        let (i, _) = verify(be_u8, |c| c.is_alpha()).parse(i)?;
+        let (i, _) = take_while(is_alnum_hyphen).parse(i)?;
         Ok((i, ()))
-    })(i)
+    })
+    .parse(i)
 }
 
 #[cfg(test)]
